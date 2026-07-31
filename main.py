@@ -20,11 +20,15 @@ class TaskORM(Base):
     title: Mapped[str]
     completed: Mapped[bool] = mapped_column(default=False)
 
+class CategoryORM(Base):
+    __tablename__ = "categories"
+    name: Mapped[str]
+
 @asynccontextmanager
 async def lifespan(_:FastAPI):
     Base.metadata.create_all(bind=engine)
     yield
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -44,6 +48,10 @@ def task_to_model(task: TaskORM) -> Task:
     return Task(id=task.id,
                 title=task.title,
                 completed=task.completed)
+
+def category_to_model(category: CategoryORM) -> Category:
+    return Category(id=category.id,
+                    name=category.name)
 
 class Task(BaseModel):
     id: str
@@ -98,31 +106,29 @@ def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 @app.post("/categories", response_model=Category, status_code=status.HTTP_201_CREATED)
-def create_category(payload: CategoryCreate):
-    category = Category(id=str(uuid.uuid4()), name=payload.name)
-    categories.append(category)
-    return category
-
+def create_category(payload: CategoryCreate, db: Session = Depends(get_db)) -> Category:
+    category = CategoryORM(name=payload.name)
+    db.add(category)
+    db.commit()
+    return category_to_model(category)
 @app.get("/categories", response_model=list[Category])
-def get_categories() -> list[Category]:
-    if categories is None:
-        return []
-    return categories
+def get_categories(db: Session = Depends(get_db)) -> list[Category]:
+    categories = db.scalars(select(CategoryORM)).all()
+    return [category_to_model(category) for category in categories]
 
 @app.patch("/categories/{category_id}", response_model=Category, status_code=status.HTTP_200_OK)
-def update_category(category_id: str, payload: CategoryUpdate) -> Category:
-    for category in categories:
-        if category.id == category_id:
-            if payload.name is not None:
-                category.name = payload.name
-            return category
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+def update_category(category_id: str, payload: CategoryUpdate, db: Session = Depends(get_db)) -> Category:
+    category = db.get(CategoryORM, category_id)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    category.name = payload.name if payload.name is not None else category.name
+    db.commit()
+    return category_to_model(category)
 
 @app.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_category(category_id: str) -> None:
-    for category in categories:
-        if category.id == category_id:
-            categories.remove(category)
-            return
-        if category.id is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+def delete_category(category_id: str, db: Session = Depends(get_db)) -> None:
+    category = db.get(CategoryORM, category_id)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    db.delete(category)
+    db.commit()
