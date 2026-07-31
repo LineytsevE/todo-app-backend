@@ -1,8 +1,29 @@
 import uuid
-from fastapi import FastAPI, status, HTTPException
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, status, HTTPException, Depends
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
 
+DATABASE_URL = "postgresql+psycopg://postgres:admin@127.0.0.1:5432/postgres"
+engine = create_engine(DATABASE_URL)
+Sessionlocal = sessionmaker(bind=engine)
+
+class Base(DeclarativeBase):
+    id: Mapped[str] = mapped_column(primary_key=True,
+                                    default=lambda: str(uuid.uuid4()))
+
+class TaskORM(Base):
+    __tablename__ = "tasks"
+    title: Mapped[str]
+    completed: Mapped[bool] = mapped_column(default=False)
+
+@asynccontextmanager
+async def lifespan(_:FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -11,6 +32,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def get_db():
+    db = Sessionlocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def task_to_model(task: TaskORM) -> Task:
+    return Task(id=task.id,
+                title=task.title,
+                completed=task.completed)
 
 class Task(BaseModel):
     id: str
@@ -34,37 +67,35 @@ class CategoryCreate(BaseModel):
 class CategoryUpdate(BaseModel):
     name: str
 
-tasks: list[Task] = []
-categories: list[Category] = []
-
 @app.get("/tasks", response_model=list[Task])
-def get_tasks() -> list[Task]:
-    return tasks
+def get_tasks(db: Session = Depends(get_db)) -> list[Task]:
+    tasks = db.scalars(select(TaskORM)).all()
+    return [task_to_model(task) for task in tasks]
 
 @app.post("/tasks", response_model=Task, status_code=status.HTTP_201_CREATED)
-def create_task(payload: TaskCreate):
-    task = Task(id=str(uuid.uuid4()), title=payload.title, completed=False)
-    tasks.append(task)
-    return task
+def create_task(payload: TaskCreate, db: Session = Depends(get_db)) ->Task:
+    task = TaskORM(title=payload.title, completed=False)
+    db.add(task)
+    db.commit()
+    return task_to_model(task)
 
 @app.patch("/tasks/{task_id}", response_model=Task)
-def update_task(task_id: str, payload: TaskUpdate) -> Task:
-    for task in tasks:
-        if task.id == task_id:
-            if payload.title is not None:
-                task.title = payload.title
-            if payload.completed is not None:
-                task.completed = payload.completed
-            return task
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+def update_task(task_id: str, payload: TaskUpdate, db: Session = Depends(get_db)) -> Task:
+    task = db.get(TaskORM, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    task.title = payload.title if payload.title is not None else task.title
+    task.completed = payload.completed if payload.completed is not None else task.completed
+    db.commit()
+    return task_to_model(task)
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: str) -> None:
-    for task in tasks:
-        if task.id == task_id:
-            tasks.remove(task)
-            return
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
+    task = db.get(TaskORM, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    db.delete(task)
+    db.commit()
 
 @app.post("/categories", response_model=Category, status_code=status.HTTP_201_CREATED)
 def create_category(payload: CategoryCreate):
